@@ -1,6 +1,6 @@
 # Death and Taxes
-Death and Taxes is an economic mafia game that aims to solve the problems with its genre, namely the stagnant metas and mechanical emphasis thereof, designed and balanced by a veteran of five years. 
-You can play at: Cyanberri.github.io
+Death and Taxes is an economic mafia game that aims to solve the problems with its genre, namely the stagnant metas and mechanical emphasis thereof, designed and balanced by a veteran of five years.<br>
+You can play at: [Death and Taxes](https://cyanberri.github.io/)<br>
 Design doc: https://docs.google.com/document/d/1bkjgXSM3wrh7IcS8mrba2LaKZo9LbH_su0DsECTMX78/edit?usp=sharing
 
 ## Game overview
