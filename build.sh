@@ -4,7 +4,7 @@ set -e  # stop on errors
 echo "Starting build..."
 
 cd ./fun
-unzip asio.zip -d asio
+unzip asio.zip -d asio -o
 
 ls -R
 # Compile your C++ backend
