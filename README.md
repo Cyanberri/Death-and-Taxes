@@ -1,3 +1,4 @@
+
 # Death and Taxes
 Death and Taxes is an economic mafia game that aims to solve the problems with its genre, namely the stagnant metas and mechanical emphasis thereof, designed and balanced by a veteran of five years.<br>
 You can play at: [Death and Taxes](https://cyanberri.github.io/)<br>
@@ -5,7 +6,7 @@ Design doc: https://docs.google.com/document/d/1bkjgXSM3wrh7IcS8mrba2LaKZo9LbH_s
 
 ## Game overview
 Death and Taxes was designed primarily to emphasise the *social* aspect of the social deduction game. 
-
+<img width="400" height="100" alt="Consigliere sizing up the Deputy." src="https://github.com/user-attachments/assets/029c3baa-b838-494e-9903-e4a2cd67614c" />
 Everyone has a special power here; no boring Townies! But that's not why *this* game is special.
 
 The Mayoral Elections here require an attentive Town to make the most of it by electing the right person with the parliament ability the Town needs right now. 
