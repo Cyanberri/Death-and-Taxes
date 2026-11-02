@@ -20,6 +20,8 @@ using namespace std;
 using namespace websocket;
 
 #define ll long long
+
+unordered_map<string, string> username_lookup;
 bool contains(vector<int>& a, int b) {
     if (a.size() == 0) return false;
     return find(a.begin(), a.end(), b) != a.end();
@@ -760,6 +762,7 @@ vector<Role> BtoW(vector<Role> blacklist) {
 class Player {
     public:
     bool alive = true;
+    bool connected = true;
     int coins = 1;
     int income = 1;
     int frameDefect = -1;
@@ -778,10 +781,10 @@ class Player {
     vector<string> effects = vector<string>{};
     vector<Ability> abilities = vector<Ability>{};
     vector<pair<int, string>> chat = vector<pair<int, string>>{};
-    Player() : Player("default") {}
-    Player (string username) {
+    Player() : Player("default", "error") {}
+    Player (string id, string username) {
         this->username = username;
-        this->id = username;
+        this->id = id;
     }
 };
 
@@ -798,6 +801,11 @@ bool contains(vector<string>& a, Role b) {
 bool operator==(const Player& a, const Player& b) {
     return a.id == b.id;
 }
+
+bool operator==(const Player& a, string b) {
+    return a.id == b;
+}
+
 class GameState {
     public:
     string mode;
@@ -856,6 +864,7 @@ map<string, Rolelist> preset_rolelists {
 
 class lobbyState {
     public:
+    mutex mtx;
     map<string, string> tokenRef;           // token → player ID
     map<string, int> playerIds;             // player ID → local ID
     map<string, string> lobbies;            // player ID → lobby code
@@ -864,6 +873,7 @@ class lobbyState {
 };
 
 void updateChat(lobbyState& s, Player& p) {
+    if (!p.connected) return;
     string res = "";
     nlohmann::json j;
     nlohmann::json chatArray;
@@ -885,18 +895,18 @@ void updateChat(lobbyState& s, Player& p) {
     j["type"] = "Chat";
     j["content"] = chatArray;
 
-    if (s.conns.count(p.username) == 0 || s.conns[p.username] == nullptr) {
+    if (s.conns.count(p.id) == 0 || s.conns[p.id] == nullptr) {
         return;
     }
     res = j.dump();
-    if (s.conns.find(p.username) != s.conns.end()) s.conns[p.username]->send_text(res);
+    if (p.connected) s.conns[p.id]->send_text(res);
 }
 
 void send(lobbyState& s, Player& p, string message) {
     p.chat.push_back({-1, message});
     updateChat(s, p);
 }
-Player server = Player("Server");
+Player server = Player("Server", "Server");
 
 int ability(Player& user, Ability& ab, GameState& gs, lobbyState& s);
 
@@ -911,12 +921,65 @@ void killTrigger(lobbyState& ls, GameState& gs, Player& victim, Player& killer =
     }
 }
 
+void updatePlayerList(lobbyState& ls, string code) {
+    GameState& gs = ls.gamestates[code];
+    nlohmann::json j;
+    j["type"] = "PlayerList";
+    nlohmann::json q;
+    for (Player& tp : gs.players) {
+        q.push_back(tp.username);
+    }
+    j["player-list"] = q;
+    j["mayor"] = gs.players[gs.mayor].localId;
+    nlohmann::json list;
+    list["type"] = "Rolelist";
+    list["rolelist"] = gs.rolelist.rolelist;
+    list["whitelist"] = gs.rolelist.whitelist;
+    string s1 = j.dump();
+    string s2 = list.dump();
+    for (Player& p : gs.players) {
+        if (p.connected) {
+            ls.conns[p.id]->send_text(s1);
+            ls.conns[p.id]->send_text(s2);
+        }
+    }
+}
+
+
 void endGame(lobbyState& ls, GameState& gs, string winner, string message) {
     for (Player& p : gs.players) {
         send(ls, p, "[yellow]" + message);
     }
-    gs.timer = 999999999;
+    gs.timer = -1;
     gs.phase = "Game Ended";
+    gs.started = false;
+    nlohmann::json j;
+    j["type"] = "ChangeState";
+    j["state"] = gs.phase;
+    j["dayNum"] = gs.dayNum;
+    string s = j.dump();
+    for (Player& p : gs.players) if (p.connected) {
+        ls.conns[p.id]->send_text(s);
+    }
+    vector<Player> reset;
+    for (Player p : gs.players) if (p.connected) {
+        reset.push_back(p);
+    }
+    gs.players = reset;
+    for (Player p : gs.players) {
+        p.alive = true;
+        p.abilities = vector<Ability>{};
+        p.coins = 0;
+        p.income = 1;
+        p.effects = vector<string>{};
+        p.frameDefect = -1;
+        p.defense = 0;
+        p.killers = vector<int>{};
+        p.visit = -1;
+        p.visitLocked = -1;
+        p.tag = -1;
+    }
+    updatePlayerList(ls, gs.lobbyCode);
 }
 
 string checkEnd(GameState& gs) {
@@ -939,6 +1002,7 @@ string checkEnd(GameState& gs) {
 }
 
 int kill(lobbyState& ls, GameState& gs, Player& victim, int str = 1, Player& killer = server) {
+    if (!gs.started) return 0;
     server.localId = -1;
     cout << "[KILL] Trying to kill " << victim.username << ", alive = " << victim.alive << endl;
     bool scumshield = false;
@@ -959,11 +1023,12 @@ int kill(lobbyState& ls, GameState& gs, Player& victim, int str = 1, Player& kil
     victim.killers.push_back(killer.localId);
     nlohmann::json j;
     j["type"] = "Kill";
-    j["victim"] = victim.username;
+    j["victim"] = victim.localId;
     for (Player& p : gs.players) {
         send(ls, p, "[red]" + victim.username + " has died.");
-        if (ls.conns.find(p.id) != ls.conns.end()) {
-            ls.conns[p.id]->send_text(j.dump());
+        string s = j.dump();
+        if (p.connected) {
+            ls.conns[p.id]->send_text(s);
         }
     }
     victim.alive = false;
@@ -1019,8 +1084,8 @@ Ability& FindAb(GameState& gs, int id) {
 
 string generateToken() {
     string charset = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!@#$%^&*()-_=+[{}]|/.,<>;:";
-    random_device rd; // non-deterministic random device
-    mt19937 gen(rd()); // seed mt19937 from rd
+    random_device rd; 
+    mt19937 gen(rd()); 
     uniform_int_distribution<> dist(0, charset.size() - 1);
 
     string token;
@@ -1073,10 +1138,11 @@ string checkAli(Player& p, GameState& gs) {
 void showRole(lobbyState& ls, GameState& gs, Player& p, Player& targ, string r) {
     nlohmann::json j;
     j["type"] = "RoleReveal";
-    j["player"] = targ.username;
+    j["player"] = targ.localId;
     j["role"] = r;
-    if (ls.conns.find(p.id) != ls.conns.end()) {
-        ls.conns[p.id]->send_text(j.dump());
+    string s = j.dump();
+    if (p.connected) {
+        ls.conns[p.id]->send_text(s);
     }
     
 }
@@ -1090,8 +1156,9 @@ int giveCoins(lobbyState& ls, GameState& gs, Player& p, int amount) {
     nlohmann::json j;
     j["type"] = "UpdateCoins";
     j["coins"] = p.coins;
-    if (ls.conns.find(p.id) != ls.conns.end()) {
-        ls.conns[p.id]->send_text(j.dump());
+    string s = j.dump();
+    if (p.connected) {
+        ls.conns[p.id]->send_text(s);
     }
     return amount;
 } 
@@ -1172,7 +1239,7 @@ int ability(Player& user, Ability& ab, GameState& gs, lobbyState& s) {
             string ali = checkAli(p, gs);
             if (ali == "Mayor") {
                 send(s, user, "[purple]Your target is the Mayor. You cannot determine the Mayor's alignment.</span>");
-            } if (ali == "Town" || ali == "Killer") { 
+            } else if (ali == "Town" || ali == "Killer") { 
                 send(s, user, "[green]Your target seems innocent.</span>");
             } else {
                 send(s, user, "[red]Your target seems EVIL!</span>");
@@ -1337,7 +1404,11 @@ int ability(Player& user, Ability& ab, GameState& gs, lobbyState& s) {
         case 22: { //Consigliere/Amnesiac passive
             for (Player& p : gs.players) {
                 if (contains(p.effects, "Sense" + to_string(user.localId)) || contains(gs.players[p.visit].effects, "Sense" + to_string(user.localId))) {
-                    send(s, user, to_string(p.localId + 1) + " " + p.username + " visited " + to_string(p.visit + 1) + " " + gs.players[p.visit].username + ".");
+                    if (p.visit == -1) {
+                        send(s, user, to_string(p.localId + 1) + " " + p.username + "didn't visit anyone last night.");
+                    } else {
+                        send(s, user, to_string(p.localId + 1) + " " + p.username + " visited " + to_string(p.visit + 1) + " " + gs.players[p.visit].username + ".");
+                    }
                 }
             }
         }
@@ -1508,29 +1579,7 @@ string generateLobbyCode(map<string, GameState>& gamemodes) {
 
 const int MAX_PLAYERS = 16;
 
-void updatePlayerList(lobbyState& ls, string code) {
-    GameState& gs = ls.gamestates[code];
-    nlohmann::json j;
-    j["type"] = "PlayerList";
-    nlohmann::json q;
-    for (Player& tp : gs.players) {
-        q.push_back(tp.username);
-    }
-    j["player-list"] = q;
-    j["mayor"] = gs.players[gs.mayor].username;
-    nlohmann::json list;
-    list["type"] = "Rolelist";
-    list["rolelist"] = gs.rolelist.rolelist;
-    list["whitelist"] = gs.rolelist.whitelist;
-    for (Player& p : gs.players) {
-        if (ls.conns.find(p.id) != ls.conns.end()) {
-            ls.conns[p.id]->send_text(j.dump());
-            ls.conns[p.id]->send_text(list.dump());
-        }
-    }
-}
-
-string join(string mode, string playerId, lobbyState& s) {
+string join(string mode, string playerId, string username, lobbyState& s) {
     cout << "join() called with mode: " << mode << ", playerId: " << playerId << endl;
     string uppercase = "QWERTYUIOPASDFGHJKLZXCVBNM";
     bool customCode = true;
@@ -1551,7 +1600,7 @@ string join(string mode, string playerId, lobbyState& s) {
         if (gs.players.size() < MAX_PLAYERS && !gs.started) {
             s.playerIds[playerId] = gs.players.size();
             s.lobbies[playerId] = mode;
-            gs.players.push_back(Player(playerId));
+            gs.players.push_back(Player(playerId, username));
             updatePlayerList(s, mode);
             return "Join Successful!";
         } else return "Lobby was full or has already started.";
@@ -1578,7 +1627,7 @@ string join(string mode, string playerId, lobbyState& s) {
         GameState& gs = s.gamestates[code];
         s.playerIds[playerId] = gs.players.size();
         s.lobbies[playerId] = code;
-        gs.players.push_back(Player(playerId));
+        gs.players.push_back(Player(playerId, username));
         cout << "Player joined lobby: " << code << endl;
         cout << "Players count after join: " << gs.players.size() << endl; //this prints correctly
         updatePlayerList(s, code);
@@ -1589,18 +1638,27 @@ string join(string mode, string playerId, lobbyState& s) {
 }
 
 void leave(string playerId, lobbyState& s) {
-    GameState& gs = s.gamestates[s.lobbies[playerId]];
-    if (s.playerIds[playerId] > 0) {
+    if (s.playerIds.count(playerId)) {
+        GameState& gs = s.gamestates[s.lobbies[playerId]];
+
         int rem = s.playerIds[playerId];
-        s.playerIds[playerId] = 0;
+        s.playerIds.erase(playerId);
+
         string lobby = s.lobbies[playerId];
         auto p = find(gs.players.begin(), gs.players.end(), playerId);
-        gs.players.erase(p);
+        p->connected = false;
+        kill(s, gs, *p, 999);
+
         int c = 0;
+
         for (Player& pl : gs.players) {
             s.playerIds[pl.id] = c;
             gs.players[c].localId = c;
             ++c;
+        }
+        if (!gs.started) {
+            gs.players.erase(p);
+            updatePlayerList(s, gs.lobbyCode);
         }
         if (gs.players.size() == 0) s.gamestates.erase(gs.lobbyCode);
         s.lobbies[playerId] = "";
@@ -1660,8 +1718,9 @@ void showAbs(lobbyState& ls, GameState& gs, vector<string> phases) {
                     j["charges"] = ab.charges;
                     j["target"] = ab.target;
                     j["id"] = ab.id;
-                    if (ls.conns.find(p.id) != ls.conns.end()) {
-                        ls.conns[p.id]->send_text(j.dump());
+                    string s = j.dump();
+                    if (p.connected) {
+                        ls.conns[p.id]->send_text(s);
                     }
                 }
             }
@@ -1677,10 +1736,13 @@ void nextPhase(lobbyState& ls, GameState& gs) {
     if (!gs.started) return;
     nlohmann::json j;
     j["type"] = "ClearAbs";
-    for (Player& p : gs.players) if (ls.conns.find(p.id) != ls.conns.end()) {
-        ls.conns[p.id]->send_text(j.dump());
+    string s = j.dump();
+    for (Player& p : gs.players) 
+    if (p.connected) {
+        ls.conns[p.id]->send_text(s);
     }
     j["type"] = "ChangeState";
+    
     if (gs.phase == "Election") {
         procAbs(gs, {"Election"}, ls);
         vector<int> voteCount(gs.players.size(), 0);
@@ -1802,11 +1864,15 @@ void nextPhase(lobbyState& ls, GameState& gs) {
     } else {
 
     }
+    if (!gs.started) gs.phase = "Game Ended";
     j["state"] = gs.phase;
     j["dayNum"] = gs.dayNum;
-    for (Player& p : gs.players) if (ls.conns.find(p.id) != ls.conns.end()) {
-        ls.conns[p.id]->send_text(j.dump());
+    s = j.dump();
+    for (Player& p : gs.players) 
+    if (p.connected) {
+        ls.conns[p.id]->send_text(s);
     }
+    if (!gs.started) return;
     if (gs.dayNum > 0 && gs.phase == "Night") {
         showAbs(ls, gs, {"Night", "Night*"});
     } else {
@@ -1817,6 +1883,10 @@ void nextPhase(lobbyState& ls, GameState& gs) {
 
 void tick(lobbyState& ls) {
     for (auto& [code, gs] : ls.gamestates) {
+        if (gs.players.empty()) {
+            ls.gamestates.erase(code);
+            continue;
+        }
         gs.timer -= 0.1;
         if (gs.timer <= 0) {
             nextPhase(ls, gs);
@@ -1832,13 +1902,17 @@ void startGame(lobbyState& ls, GameState& gs) {
     
     shuffle(players.begin(), players.end(), g);
     shuffle(rolelist.begin(), rolelist.end(), g);
-    
+
     for (int i = 0; i < players.size(); ++i) {
-        int abId = 0;
         players[i].role = roles[rolelist[i]];
         players[i].alignment = players[i].role.alignment;
         players[i].localId = i;
         players[i].alive = true;
+        players[i].chat.clear();
+    }
+    
+    for (int i = 0; i < players.size(); ++i) {
+        int abId = 0;
         for (Ability ab : players[i].role.abs) {
             ab.id = abId;
             players[i].abilities.push_back(ab);
@@ -1863,9 +1937,11 @@ void startGame(lobbyState& ls, GameState& gs) {
         }
         nlohmann::json j;
         j["type"] = "ShowRole";
+        j["player"] = players[i].localId;
         j["role"] = players[i].role.name;
         ls.conns[players[i].id]->send_text(j.dump());
         giveCoins(ls, gs, players[i], 0);
+        send(ls, players[i], "Your role is " + players[i].role.name);
         ls.playerIds[players[i].id] = i;
     }
     for (string faction : factionalKills) {
@@ -1902,9 +1978,9 @@ void startGame(lobbyState& ls, GameState& gs) {
     updatePlayerList(ls, gs.lobbyCode);
     nextPhase(ls, gs);
 }
-string db_api_key = "sb_secret_6XFWaWtLrNhggNLsOTreuQ_coxeuOQJ", api_url = "https://oidefkjyhtlcahcuuthk.supabase.co";
+// string db_api_key = "sb_secret_6XFWaWtLrNhggNLsOTreuQ_coxeuOQJ", api_url = "https://oidefkjyhtlcahcuuthk.supabase.co";
 
-string table = "Data";
+// string table = "Data";
 
 // class SupabaseClient {
 //     private:
@@ -2023,6 +2099,7 @@ int main() {
         
     })
     .onmessage([&state](websocket::connection& conn, const string& data, bool is_binary) {
+        lock_guard<mutex> lock(state.mtx);
         cout<<"yes received"<<endl;
         auto msg = json::load(data);
         if (!msg || !msg.has("type")) return;
@@ -2033,18 +2110,19 @@ int main() {
             string token = msg["token"].s();
             string id = msg["id"].s();
             if (state.tokenRef[token] == id) {
-                string lobbyId = state.lobbies[id];
-                int playerId = state.playerIds[id];
-                state.conns[id] = &conn;
-                cout<<"authorized"<<endl; //doesn't print?
+                string lobbyId = state.lobbies[token];
+                int playerId = state.playerIds[token];
+                state.conns[token] = &conn;
+                cout<<"authorized"<<endl; 
             } else {
                 conn.close("Unauthorized");
             }
         } else if (type == "chat") {
             string message = msg["msg"].s();
-            string id = msg["id"].s();
-            int localId = state.playerIds[id];
-            string lobby = state.lobbies[id];
+            string token = msg["id"].s();
+            string username = username_lookup[token];
+            int localId = state.playerIds[token];
+            string lobby = state.lobbies[token];
             vector<Player>& players = state.gamestates[lobby].players;
             Player& p = players[localId];
             istringstream iss(message);
@@ -2087,6 +2165,7 @@ int main() {
                 }
             } else {
                 for (Player& player : players) {
+                    if (!player.connected) continue; //didnt have this before
                     player.chat.push_back({localId, message});
                     updateChat(state, player);
                 }
@@ -2114,19 +2193,31 @@ int main() {
             }
         }
     })
-    .onclose([&state](websocket::connection& conn,
-     const string& data,
-     uint16_t code) {
-        for (pair<string, GameState> gs : state.gamestates) {
-            for (Player& p : gs.second.players) {
-                leave(p.id, state);
+    .onclose([&state](websocket::connection& conn, const string& data, uint16_t code) {
+        lock_guard<mutex> lock(state.mtx);
+        string disconnectedId = "";
+        
+        // Find which player ID belongs to this specific connection pointer
+        for (const auto& pair : state.conns) {
+            if (pair.second == &conn) {
+                disconnectedId = pair.first;
+                break;
             }
+        }
+        
+        // If we found the player, remove ONLY them from the game
+        if (!disconnectedId.empty()) {
+            leave(disconnectedId, state);
+            state.conns.erase(disconnectedId); // Clean up their connection entry
+            cout << "Player " << disconnectedId << " disconnected safely." << endl;
+        } else {
+            cout << "An unauthenticated or unknown connection closed." << endl;
         }
         
     });
 
     CROW_ROUTE(app, "/join/<string>").methods("POST"_method) ([&state](const request& req, string mode) {
-
+        lock_guard<mutex> lock(state.mtx);
         auto body = json::load(req.body);
         if (!body) {
             return response(400, "Malformed JSON");
@@ -2149,7 +2240,7 @@ int main() {
         rest.code = 200;
         rest.set_header("Content-Type", "text/plain");
         try {
-            rest.body = join(mode, id, state);
+            rest.body = join(mode, token, id, state);
         } catch (const exception& e) {
             return response(500, "Internal server error");
         }
@@ -2158,14 +2249,17 @@ int main() {
 
     thread tickLoop([&state] {
         while (true) {
+            lock_guard<mutex> lock(state.mtx);
             tick(state);
             this_thread::sleep_for(chrono::milliseconds(100));
         }
     });
     tickLoop.detach();
+
     const char* port_env = getenv("PORT");
     int port = port_env ? stoi(port_env) : 18080;
     app.port(port).run();
+
     #ifdef _WIN32
     WSACleanup();
     #endif
