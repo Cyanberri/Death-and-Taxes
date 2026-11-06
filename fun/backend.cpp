@@ -864,7 +864,6 @@ map<string, Rolelist> preset_rolelists {
 
 class lobbyState {
     public:
-    mutex mtx;
     map<string, string> tokenRef;           // token → player ID
     map<string, int> playerIds;             // player ID → local ID
     map<string, string> lobbies;            // player ID → lobby code
@@ -947,6 +946,7 @@ void updatePlayerList(lobbyState& ls, string code) {
 
 
 void endGame(lobbyState& ls, GameState& gs, string winner, string message) {
+    cout<<"GAME ENDED!\n";
     for (Player& p : gs.players) {
         send(ls, p, "[yellow]" + message);
     }
@@ -965,6 +965,12 @@ void endGame(lobbyState& ls, GameState& gs, string winner, string message) {
     for (Player p : gs.players) if (p.connected) {
         reset.push_back(p);
     }
+    cout<<"FINIO FINIRE!\n";
+    if (reset.size() == 0) {
+        ls.gamestates.erase(gs.lobbyCode);
+        return;
+    }
+    
     gs.players = reset;
     for (Player p : gs.players) {
         p.alive = true;
@@ -1639,29 +1645,43 @@ string join(string mode, string playerId, string username, lobbyState& s) {
 
 void leave(string playerId, lobbyState& s) {
     if (s.playerIds.count(playerId)) {
-        GameState& gs = s.gamestates[s.lobbies[playerId]];
-
-        int rem = s.playerIds[playerId];
-        s.playerIds.erase(playerId);
+        if (!s.playerIds.count(playerId)) return;
 
         string lobby = s.lobbies[playerId];
+        if (s.gamestates.find(lobby) == s.gamestates.end()) {
+            s.playerIds.erase(playerId);
+            s.lobbies[playerId] = "";
+            return;
+        }
+
+        GameState& gs = s.gamestates[lobby];
         auto p = find(gs.players.begin(), gs.players.end(), playerId);
+        if (p == gs.players.end()) return;
         p->connected = false;
         kill(s, gs, *p, 999);
-
+        if (!s.gamestates.count(gs.lobbyCode)) return;
         int c = 0;
-
-        for (Player& pl : gs.players) {
-            s.playerIds[pl.id] = c;
-            gs.players[c].localId = c;
-            ++c;
-        }
         if (!gs.started) {
             gs.players.erase(p);
             updatePlayerList(s, gs.lobbyCode);
         }
-        if (gs.players.size() == 0) s.gamestates.erase(gs.lobbyCode);
         s.lobbies[playerId] = "";
+        if (gs.players.size() == 0) {
+            s.gamestates.erase(gs.lobbyCode);
+            return;
+        }
+        
+        for (Player& pl : gs.players) {
+            if (!pl.connected) {
+                ++c;
+                continue;
+            }
+            s.playerIds[pl.id] = c;
+            pl.localId = c;
+            ++c;
+        }
+        
+        
     }
 }
 
@@ -2099,7 +2119,6 @@ int main() {
         
     })
     .onmessage([&state](websocket::connection& conn, const string& data, bool is_binary) {
-        lock_guard<mutex> lock(state.mtx);
         cout<<"yes received"<<endl;
         auto msg = json::load(data);
         if (!msg || !msg.has("type")) return;
@@ -2123,6 +2142,7 @@ int main() {
             string username = username_lookup[token];
             int localId = state.playerIds[token];
             string lobby = state.lobbies[token];
+            // lock_guard<mutex> lock(*(state.gamestates[lobby].mtx));
             vector<Player>& players = state.gamestates[lobby].players;
             Player& p = players[localId];
             istringstream iss(message);
@@ -2183,6 +2203,7 @@ int main() {
             int localId = state.playerIds[pId];
             string lobby = state.lobbies[pId];
             GameState& gs = state.gamestates[lobby];
+            // lock_guard<mutex> lock(*(gs.mtx));
             Player& p = gs.players[localId];
             cout<<"Client updating "<<abId<<endl;
             for (Ability& ab : p.abilities) {
@@ -2194,21 +2215,18 @@ int main() {
         }
     })
     .onclose([&state](websocket::connection& conn, const string& data, uint16_t code) {
-        lock_guard<mutex> lock(state.mtx);
         string disconnectedId = "";
         
-        // Find which player ID belongs to this specific connection pointer
-        for (const auto& pair : state.conns) {
+        for (auto& pair : state.conns) {
             if (pair.second == &conn) {
                 disconnectedId = pair.first;
                 break;
             }
         }
         
-        // If we found the player, remove ONLY them from the game
         if (!disconnectedId.empty()) {
             leave(disconnectedId, state);
-            state.conns.erase(disconnectedId); // Clean up their connection entry
+            state.conns.erase(disconnectedId); 
             cout << "Player " << disconnectedId << " disconnected safely." << endl;
         } else {
             cout << "An unauthenticated or unknown connection closed." << endl;
@@ -2217,7 +2235,6 @@ int main() {
     });
 
     CROW_ROUTE(app, "/join/<string>").methods("POST"_method) ([&state](const request& req, string mode) {
-        lock_guard<mutex> lock(state.mtx);
         auto body = json::load(req.body);
         if (!body) {
             return response(400, "Malformed JSON");
@@ -2249,9 +2266,8 @@ int main() {
 
     thread tickLoop([&state] {
         while (true) {
-            lock_guard<mutex> lock(state.mtx);
             tick(state);
-            this_thread::sleep_for(chrono::milliseconds(100));
+            this_thread::sleep_for(chrono::milliseconds(1000));
         }
     });
     tickLoop.detach();
